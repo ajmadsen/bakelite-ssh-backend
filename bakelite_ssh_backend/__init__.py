@@ -37,6 +37,17 @@ def parse_args(args: List[str]):
     parser.add_argument(
         "-l", "--login-name", help="the user to use when connecting to the server"
     )
+    parser.add_argument(
+        "--no-mode", help="do not chmod the remote files", action="store_true"
+    )
+    parser.add_argument(
+        "--no-time", help="do not update mtime of remote files", action="store_true"
+    )
+    parser.add_argument(
+        "--no-confirm",
+        help="do not confirm size of remote files after upload",
+        action="store_true",
+    )
     return parser.parse_args(args)
 
 
@@ -47,10 +58,16 @@ def mkdir_r(client: paramiko.SFTPClient, path: str):
         client.stat(path)
     except FileNotFoundError:
         mkdir_r(client, os.path.dirname(path))
-        client.mkdir(path)
+        client.mkdir(path, 0o755)
 
 
-def put_archive(tar_file: tarfile.TarFile, client: paramiko.SFTPClient):
+def put_archive(
+    tar_file: tarfile.TarFile,
+    client: paramiko.SFTPClient,
+    no_mode=False,
+    no_time=False,
+    no_confirm=False,
+):
     seen_dir = set()
     while True:
         info = tar_file.next()
@@ -59,7 +76,8 @@ def put_archive(tar_file: tarfile.TarFile, client: paramiko.SFTPClient):
 
         if info.isdir():
             client.mkdir(info.name, info.mode)
-            client.utime(info.name, (info.mtime, info.mtime))
+            if not no_time:
+                client.utime(info.name, (info.mtime, info.mtime))
 
         if not info.isfile():
             print(f"skipping non-file {info.name}", file=sys.stderr)
@@ -70,9 +88,11 @@ def put_archive(tar_file: tarfile.TarFile, client: paramiko.SFTPClient):
             seen_dir.add(dirname)
 
         src = tar_file.extractfile(info)
-        client.putfo(src, info.name, info.size)
-        client.chmod(info.name, info.mode)
-        client.utime(info.name, (info.mtime, info.mtime))
+        client.putfo(src, info.name, info.size, confirm=not no_confirm)
+        if not no_mode:
+            client.chmod(info.name, info.mode)
+        if not no_time:
+            client.utime(info.name, (info.mtime, info.mtime))
 
 
 def main(args: List[str] = None):
@@ -103,7 +123,9 @@ def main(args: List[str] = None):
     tar_file = tarfile.open(mode="r|*", fileobj=parsed.tarfile)
 
     try:
-        put_archive(tar_file, sftp_client)
+        put_archive(
+            tar_file, sftp_client, parsed.no_mode, parsed.no_time, parsed.no_confirm
+        )
     finally:
         tar_file.close()
         parsed.tarfile.close()

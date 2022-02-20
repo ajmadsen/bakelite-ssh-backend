@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "bakelite-ssh-backend"
+version = "0.1.0"
+description = "A reference project for storing a bakelite-produced .tar file on a remote system that does not have the `tar` binary."
+authors = ["Adam Madsen <adam@ajmadsen.com>"]
+license = "MIT"
+
+[tool.poetry.dependencies]
+python = "^3.6"
+paramiko = "^2.9.2"
+
+[tool.poetry.dev-dependencies]
+
+[tool.poetry.scripts]
+bakelite-ssh-backend = "bakelite_ssh_backend:main"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"

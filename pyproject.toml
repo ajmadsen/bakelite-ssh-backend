@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "bakelite-ssh-backend"
-version = "0.1.0"
+version = "0.1.1"
 description = "A reference project for storing a bakelite-produced .tar file on a remote system that does not have the `tar` binary."
 authors = ["Adam Madsen <adam@ajmadsen.com>"]
 license = "MIT"

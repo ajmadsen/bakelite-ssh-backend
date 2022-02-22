@@ -1,0 +1,21 @@
+[package]
+name = "bakelite-ssh-backend"
+version = "0.1.0"
+edition = "2021"
+description = "A backend to write a .tar file produced by bakelite to a remote backend where `tar` is unavailable"
+license = "MIT"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[dependencies]
+futures = "0.3"
+tokio = { version = "1.17", features = ["full"] }
+async-ssh2-lite = "0.2"
+async-tar = "0.4"
+async-compat = "0.2"
+whoami = "1.2"
+clap = { version = "3.1", features = ["derive"] }
+extfmt = "0.1"
+async-std = { version = "1.7", features = ["tokio1", "unstable"]}
+async-io = "1.6"
+unix_path = "1.0.1"
+unix_str = "1.0.0"

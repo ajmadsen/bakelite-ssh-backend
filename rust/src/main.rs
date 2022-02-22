@@ -1,8 +1,8 @@
 #![feature(trait_alias)]
 
 use std::collections::BTreeSet;
-use std::ffi::{OsStr, OsString};
 use std::io::{Error, ErrorKind};
+use std::path::Path;
 use std::sync::Arc;
 
 use async_compat::CompatExt;
@@ -17,8 +17,8 @@ use tokio::{
     net::TcpStream,
     sync::RwLock,
 };
-use unix_path::PathBuf;
-use unix_str::UnixString;
+
+use bakelite_ssh_backend::SimplePath;
 
 trait Readable = tio::AsyncRead + Unpin + Send + Sync;
 
@@ -49,42 +49,16 @@ struct Args {
     host: String,
 }
 
-fn wrap_reader<'a>(r: impl Readable + 'a) -> BufReader<Box<dyn Readable + 'a>> {
+fn wrap_readable<'a>(r: impl Readable + 'a) -> BufReader<Box<dyn Readable + 'a>> {
     BufReader::new(Box::new(r))
-}
-
-struct OurPathBuf {
-    inner: PathBuf,
-}
-
-impl OurPathBuf {
-    fn new(p: PathBuf) -> Self {
-        Self { inner: p }
-    }
-
-    fn join<P: AsRef<OsStr>>(self: &Self, seg: P) -> Self {
-        Self { inner: self.inner.join(PathBuf::from(seg.as_ref().to_string_lossy().into_owned())) }
-    }
-}
-
-impl From<&OurPathBuf> for OsString {
-    fn from(other: &OurPathBuf) -> Self {
-        OsString::from(other.inner.to_string_lossy().into_owned())
-    }
-}
-
-impl AsRef<PathBuf> for OurPathBuf {
-    fn as_ref(&self) -> &PathBuf {
-        &self.inner
-    }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Args = Args::parse();
+    let args = Args::parse();
     let reader = match args.tarfile {
-        Some(f) => wrap_reader(File::open(f).await?),
-        None => wrap_reader(tio::stdin()),
+        Some(f) => wrap_readable(File::open(f).await?),
+        None => wrap_readable(tio::stdin()),
     };
     let archive = Archive::new(reader.compat());
 
@@ -103,60 +77,79 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("connected!");
 
-    let base_path = OurPathBuf::new(PathBuf::from(args.chdir.unwrap_or(".".to_owned())));
-    let seen_paths = Arc::new(RwLock::new(BTreeSet::<UnixString>::new()));
+    let _os_base_path = std::path::PathBuf::from(args.chdir.clone().unwrap_or(".".to_owned()));
+    let base_path = SimplePath::new(args.chdir.unwrap_or(".".to_owned()));
+    let seen_paths = Arc::new(RwLock::new(BTreeSet::<String>::new()));
 
-    archive.entries()?.try_for_each(|mut ent| {
-        let base_path = &base_path;
-        let seen_paths = seen_paths.clone();
-        let sftp = &sftp;
-        let session = &session;
-        async move {
-            if !ent.header().entry_type().is_file() {
-                return Ok(());
-            }
-            let dst = base_path.join(ent.path()?.as_ref());
-            let ancestors: Vec<_> = dst.as_ref().ancestors().skip(1).collect::<Vec<_>>().into_iter().rev().filter(|&p| !p.as_unix_str().is_empty()).collect();
-            // println!("ancestors: {:?}", ancestors);
-            for pth in ancestors {
-                if pth.as_unix_str().is_empty() || seen_paths.read().await.contains(pth.as_unix_str()) {
-                    continue;
+    archive
+        .entries()?
+        .try_for_each(|mut ent| {
+            let base_path = &base_path;
+            let seen_paths = seen_paths.clone();
+            let sftp = &sftp;
+            let session = &session;
+            async move {
+                if !ent.header().entry_type().is_file() {
+                    return Ok(());
                 }
-                let npth = OsString::from(&OurPathBuf::new(pth.to_owned()));
-                match sftp.stat(npth.as_ref()).await {
-                    Ok(_) => (),
-                    Err(_) => {
-                        // println!("mkdir {}", pth.to_string_lossy());
-                        sftp.mkdir(npth.as_ref(), 0o755).await?
+                let dst = base_path.join(ent.path()?.to_string_lossy());
+                let ancestors: Vec<_> = dst
+                    .ancestors()
+                    .skip(1)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .filter(|&p| !p.is_empty())
+                    .collect();
+                println!("ancestors: {:?}", ancestors);
+                for pth in ancestors {
+                    if pth.is_empty() || seen_paths.read().await.contains(pth) {
+                        continue;
+                    }
+                    let npth = Path::new(pth);
+                    match sftp.stat(npth.as_ref()).await {
+                        Ok(_) => (),
+                        Err(_) => {
+                            // println!("mkdir {}", pth);
+                            sftp.mkdir(npth.as_ref(), 0o755).await?
+                        }
+                    }
+                    {
+                        let mut seen_paths = seen_paths.write().await;
+                        seen_paths.insert(pth.to_owned());
                     }
                 }
-                {
-                    let mut seen_paths = seen_paths.write().await;
-                    seen_paths.insert(pth.as_unix_str().to_owned());
+
+                let sz = ent.header().size()?;
+                // println!("put {} [{} bytes]", dst.as_str(), sz);
+
+                // let mut fp = sftp.open_mode(OsString::from(&dst).as_ref(), OpenFlags::TRUNCATE | OpenFlags::WRITE, 0o644, OpenType::File).await
+                //     .map_err(|e| Error::new(ErrorKind::Other, format!("could not open file: {:?}", e)))?;
+                // let bytes = fio::copy(&mut ent, &mut fp).await
+                //     .map_err(|e| Error::new(ErrorKind::Other, format!("could not write bytes: {:?}", e)))?;
+                // fp.close().await?;
+                let mut ch = session
+                    .scp_send(Path::new(dst.as_str()), 0o644, sz, None)
+                    .await
+                    .map_err(|e| {
+                        Error::new(ErrorKind::Other, format!("could not open file: {:?}", e))
+                    })?;
+                let bytes = fio::copy(&mut ent, &mut ch).await.map_err(|e| {
+                    Error::new(ErrorKind::Other, format!("could not write bytes: {:?}", e))
+                })?;
+                ch.close().await?;
+
+                if bytes == sz {
+                    Ok(())
+                } else {
+                    Err(Error::new(
+                        ErrorKind::Other,
+                        format!("expected {} bytes but only wrote {}", sz, bytes),
+                    ))
                 }
             }
-
-            let sz = ent.header().size()?;
-            // println!("put {} [{} bytes]", dst.as_ref().to_string_lossy(), sz);
-
-            // let mut fp = sftp.open_mode(OsString::from(&dst).as_ref(), OpenFlags::TRUNCATE | OpenFlags::WRITE, 0o644, OpenType::File).await
-            //     .map_err(|e| Error::new(ErrorKind::Other, format!("could not open file: {:?}", e)))?;
-            // let bytes = fio::copy(&mut ent, &mut fp).await
-            //     .map_err(|e| Error::new(ErrorKind::Other, format!("could not write bytes: {:?}", e)))?;
-            // fp.close().await?;
-            let mut ch = session.scp_send(OsString::from(&dst).as_ref(), 0o644, sz, None).await
-                .map_err(|e| Error::new(ErrorKind::Other, format!("could not open file: {:?}", e)))?;
-            let bytes = fio::copy(&mut ent, &mut ch).await
-                .map_err(|e| Error::new(ErrorKind::Other, format!("could not write bytes: {:?}", e)))?;
-            ch.close().await?;
-
-            if bytes == sz {
-                Ok(())
-            } else {
-                Err(Error::new(ErrorKind::Other, format!("expected {} bytes but only wrote {}", sz, bytes)))
-            }
-        }
-    }).await?;
+        })
+        .await?;
 
     session.disconnect(None, "goodbye", None).await?;
 

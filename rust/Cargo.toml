@@ -17,5 +17,3 @@ clap = { version = "3.1", features = ["derive"] }
 extfmt = "0.1"
 async-std = { version = "1.7", features = ["tokio1", "unstable"]}
 async-io = "1.6"
-unix_path = "1.0.1"
-unix_str = "1.0.0"

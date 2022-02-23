@@ -9,11 +9,11 @@ license = "MIT"
 [dependencies]
 futures = "0.3"
 tokio = { version = "1.17", features = ["full"] }
-async-ssh2-lite = "0.2"
+async-ssh2-lite = "0.2.1"
 async-tar = "0.4"
 async-compat = "0.2"
 whoami = "1.2"
 clap = { version = "3.1", features = ["derive"] }
 extfmt = "0.1"
-async-std = { version = "1.7", features = ["tokio1", "unstable"]}
+async-std = { version = "1.7", features = ["tokio1", "unstable"] }
 async-io = "1.6"

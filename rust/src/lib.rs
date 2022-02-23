@@ -1,5 +1,7 @@
+use std::ops::Deref;
 use std::path::Path;
 
+#[derive(Clone, Debug)]
 pub struct SimplePath {
     buf: String,
 }
@@ -47,6 +49,20 @@ impl AsRef<str> for SimplePath {
 impl AsRef<Path> for SimplePath {
     fn as_ref(&self) -> &Path {
         Path::new(self.buf.as_str())
+    }
+}
+
+impl Deref for SimplePath {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        Path::new(self.as_str())
+    }
+}
+
+impl Into<SimplePath> for &str {
+    fn into(self) -> SimplePath {
+        SimplePath::new(self)
     }
 }
 

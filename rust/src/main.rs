@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use async_compat::CompatExt;
 use async_io::Async;
-use async_ssh2_lite::AsyncSession;
+use async_ssh2_lite::{AsyncSession, AsyncSftp};
 use async_tar::Archive;
 use clap::Parser;
 use futures::{io as fio, prelude::*};
@@ -50,18 +50,12 @@ struct Args {
 }
 
 fn wrap_readable<'a>(r: impl Readable + 'a) -> BufReader<Box<dyn Readable + 'a>> {
-    BufReader::new(Box::new(r))
+    BufReader::with_capacity(8 * 1024, Box::new(r))
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
-    let reader = match args.tarfile {
-        Some(f) => wrap_readable(File::open(f).await?),
-        None => wrap_readable(tio::stdin()),
-    };
-    let archive = Archive::new(reader.compat());
-
+async fn connect_from_args(
+    args: &Args,
+) -> Result<AsyncSession<std::net::TcpStream>, Box<dyn std::error::Error>> {
     let (login, host) = match args.host.split_once('@') {
         Some(x) => x,
         None => (args.login.as_str(), args.host.as_str()),
@@ -73,61 +67,80 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     session.handshake().await?;
     session.userauth_agent_with_try_next(login).await?;
-    let sftp = session.sftp().await?;
+    Ok(session)
+}
+
+async fn mkdir_r<T, P: Into<SimplePath>>(
+    sftp: &AsyncSftp<T>,
+    pth: P,
+    seen_paths: Arc<RwLock<BTreeSet<String>>>,
+) -> Result<(), std::io::Error> {
+    let pth = pth.into();
+    let ancestors: Vec<_> = pth
+        .ancestors()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .filter(|&p| !p.is_empty())
+        .collect();
+    // println!("ancestors: {:?}", ancestors);
+    for pth in ancestors {
+        if pth.is_empty() || seen_paths.read().await.contains(pth) {
+            continue;
+        }
+        let npth = Path::new(pth);
+        match sftp.stat(npth).await {
+            Ok(_) => (),
+            Err(_) => {
+                // println!("mkdir {}", pth);
+                sftp.mkdir(npth, 0o755).await?
+            }
+        }
+        {
+            let mut seen_paths = seen_paths.write().await;
+            seen_paths.insert(pth.to_owned());
+        }
+    }
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+    let reader = match args.tarfile.as_ref() {
+        Some(f) => wrap_readable(File::open(f).await?),
+        None => wrap_readable(tio::stdin()),
+    };
+    let archive = Archive::new(reader.compat());
+
+    let session = connect_from_args(&args).await?;
+    let sftp = Arc::new(session.sftp().await?);
 
     println!("connected!");
 
-    let _os_base_path = std::path::PathBuf::from(args.chdir.clone().unwrap_or(".".to_owned()));
     let base_path = SimplePath::new(args.chdir.unwrap_or(".".to_owned()));
     let seen_paths = Arc::new(RwLock::new(BTreeSet::<String>::new()));
+
+    let tmp_path = base_path.join(".tmp");
+    mkdir_r(&sftp, tmp_path.as_str(), seen_paths.clone()).await?;
 
     archive
         .entries()?
         .try_for_each(|mut ent| {
             let base_path = &base_path;
             let seen_paths = seen_paths.clone();
-            let sftp = &sftp;
+            let sftp = sftp.clone();
             let session = &session;
             async move {
                 if !ent.header().entry_type().is_file() {
                     return Ok(());
                 }
                 let dst = base_path.join(ent.path()?.to_string_lossy());
-                let ancestors: Vec<_> = dst
-                    .ancestors()
-                    .skip(1)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .filter(|&p| !p.is_empty())
-                    .collect();
-                println!("ancestors: {:?}", ancestors);
-                for pth in ancestors {
-                    if pth.is_empty() || seen_paths.read().await.contains(pth) {
-                        continue;
-                    }
-                    let npth = Path::new(pth);
-                    match sftp.stat(npth.as_ref()).await {
-                        Ok(_) => (),
-                        Err(_) => {
-                            // println!("mkdir {}", pth);
-                            sftp.mkdir(npth.as_ref(), 0o755).await?
-                        }
-                    }
-                    {
-                        let mut seen_paths = seen_paths.write().await;
-                        seen_paths.insert(pth.to_owned());
-                    }
-                }
+                mkdir_r(&sftp, dst.ancestors().skip(1).next().unwrap(), seen_paths).await?;
 
                 let sz = ent.header().size()?;
-                // println!("put {} [{} bytes]", dst.as_str(), sz);
+                println!("put {} [{} bytes]", dst.as_str(), sz);
 
-                // let mut fp = sftp.open_mode(OsString::from(&dst).as_ref(), OpenFlags::TRUNCATE | OpenFlags::WRITE, 0o644, OpenType::File).await
-                //     .map_err(|e| Error::new(ErrorKind::Other, format!("could not open file: {:?}", e)))?;
-                // let bytes = fio::copy(&mut ent, &mut fp).await
-                //     .map_err(|e| Error::new(ErrorKind::Other, format!("could not write bytes: {:?}", e)))?;
-                // fp.close().await?;
                 let mut ch = session
                     .scp_send(Path::new(dst.as_str()), 0o644, sz, None)
                     .await
